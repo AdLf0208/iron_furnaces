@@ -1,0 +1,21 @@
+[package]
+# Port of Iron Furnaces 4.3.2 (Qelifern/IronFurnacesNeoForge branch 4.3.2 at
+# 41fde020636b79154e1c454a893962c639d89e1b, Apache-2.0). Minecraft Java 1.21.1
+# NeoForge 21.1.265; the port targets Horizon 26.3 at the pin in horizon-mod.toml.
+# Clean-room Rust rewrite from the mod's behaviour (notes.md); local-only until
+# the maintainer approves publishing, publishable under Apache-2.0 with this
+# source.
+#
+# Cargo's name and version are not the mod's identity: horizon-mod.toml is.
+name = "ironfurnaces"
+version = "0.2.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Iron Furnaces for Horizon: tiered fuel furnaces from copper to netherite"
+publish = false
+
+[dependencies]
+# The pinned SDK's API crate, fetched into .horizon/sdk/ by any `cargo horizon-mod` command (the
+# launcher builds against its own copy of the same build). Any other registry dependency must be
+# pinned with `horizon-launcher native-lock .` before building.
+horizon-mod-api = { path = ".horizon/sdk/api/crates/horizon-mod-api" }

@@ -1,0 +1,29 @@
+id = "ironfurnaces"
+name = "Iron Furnaces"
+version = "0.2.0"
+description = """A port of Iron Furnaces for Horizon: eight fuel furnaces, from copper to netherite, that smelt
+as their tier does upstream (copper 180 ticks for a 200-tick recipe, iron 160, gold 120, diamond 80,
+emerald 40, obsidian 20, crystal 40, netherite 5), burn fuel in proportion to their own cook time, show
+the lit state and use the vanilla furnace menu. A tier-upgrade item right-clicked on a compatible furnace
+replaces it with the next tier and keeps its contents and smelting progress. The silver, allthemodium,
+vibranium, unobtainium and rainbow furnaces need other mods' materials and their assets are carried but
+inert; augments, the factory, the generator, the settings screen and XP collection are not ported yet."""
+authors = ["Qelifern (pizzaatime)", "XenoMustache", "AdLf0208"]
+# The original's licence: Apache-2.0 (the 1.21.1 jar's neoforge.mods.toml); the text and the
+# provenance notice travel inside the package as LICENSE / LICENSE-NOTICE.md.
+# A native mod: Rust in src/, compiled by the launcher against the game build [native] pins,
+# beside data/ and assets/. The id is the resource namespace and the only identity: Cargo's
+# package name and version are not the mod's.
+api = "0.2"
+# The installation side, not the hook's: the furnaces tick on the server, and single player's
+# integrated server belongs to the client installation, so "both".
+side = "both"
+# The one shared value every manifest carries ("May add blocks, items, mob effects and entity
+# types"): this package really does declare the eight furnace blocks, their block entity type,
+# the ten upgrade items, the recipes, the loot, the tags and the creative tab.
+capabilities = ["registries"]
+
+[native]
+game = "26.3"
+horizon = "0b14f8acfd97fa2c750e42795249dcc981178ca4"
+mixins = "e59da9094f0c2fdda6c627fe9eff22dec6a906f0"
