@@ -19,12 +19,35 @@ Upstream: [Qelifern/IronFurnaces](https://github.com/Qelifern/IronFurnaces) — 
 - **Reviewer:** registry artifact delivery
 - **`mark_modified` is gone.** 0.1.0 inserted the chunk into `game.world.modified` by hand because a
 - **The creative check is gone.** 0.1.0 read `game.native_acting_player().game_mode == 1` before
-- **One block entity type for eight blocks.** Observably identical (same ids, same states, same
+- **One block entity type for twelve blocks.** Observably identical (same ids, same states, same
 - **The readout is byte-identical** (`ironfurnaces <tier> <x> <y> <z> burn=…/… cook=…/… input=…
+
+## Silver and the modded tiers
+
+Four furnaces beyond the jar's vanilla-only eight, each with the upstream speed and upgrades:
+
+| Furnace | Ticks per smelt | Crafted from | Upgrades |
+| --- | --- | --- | --- |
+| Silver | 140 | `c:ingots/silver` on an iron or copper furnace | copper → silver, iron → silver, silver → gold |
+| Allthemodium | 5 | allthemodium or stellarite ingots and blocks on a netherite furnace | netherite → allthemodium |
+| Vibranium | 3 | vibranium or infernium on an allthemodium furnace | allthemodium → vibranium |
+| Unobtainium | 1 | unobtainium or voidium on a vibranium furnace | vibranium → unobtainium |
+
+They need another mod's metals. Silver comes from any mod that fills
+`c:ingots/silver`, such as [Vast Ores](https://github.com/voltzz900/vast-ores).
+The modded tiers take Allthemodium's metals through `c:` tags, or
+[Vast Depths](https://github.com/voltzz900/vast-ores)' stellarite, infernium and
+voidium, which fill the same three steps; the `ironfurnaces:<tier>_ingots` and
+`ironfurnaces:<tier>_corners` item tags list both. With neither mod, the recipes
+are skipped and the furnaces are only reachable by command.
+
+The jar gates these recipes with `neoforge:tag_empty`; Horizon leaves a file
+with an unknown condition out, so the port drops the gate and relies on a
+recipe with an empty tag being skipped when it loads.
 
 ## Not yet ported
 
-- **Eight tiers only.** Silver, allthemodium, vibranium, unobtainium and the
+- **No rainbow furnace.** It needs every other tier and is left out; its assets stay inert.
 - **Augments, factory, generator, wireless heater, settings GUI, auto IO,
 - **Light 13 when lit** (the `minecraft:furnace` template) vs upstream 14.
 - **Vanilla-furnace → copper/iron upgrades** are implemented (the source is

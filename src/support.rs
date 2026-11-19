@@ -62,7 +62,7 @@ fn take_pending(
 // Declarations
 // ---------------------------------------------------------------------------
 
-/// Declare what the game answers for the eight blocks: one block entity type holding all of them,
+/// Declare what the game answers for the twelve blocks: one block entity type holding all of them,
 /// the Part that ticks it, and the three-slot furnace container on every tier.
 pub fn declare(r: &mut dyn Registrar) {
     let names = bare_names();
@@ -599,7 +599,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_tier_names_are_the_eight_ported_furnaces() {
+    fn the_tier_names_are_the_twelve_ported_furnaces() {
         assert_eq!(
             bare_names(),
             vec![
@@ -611,6 +611,10 @@ mod tests {
                 "obsidian_furnace",
                 "crystal_furnace",
                 "netherite_furnace",
+                "silver_furnace",
+                "allthemodium_furnace",
+                "vibranium_furnace",
+                "unobtainium_furnace",
             ]
         );
     }
