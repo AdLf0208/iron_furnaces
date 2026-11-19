@@ -1,4 +1,5 @@
-//! Iron Furnaces for Horizon — eight tiered fuel furnaces (copper … netherite).
+//! Iron Furnaces for Horizon — twelve tiered fuel furnaces (copper … netherite, silver and the
+//! three modded tiers).
 //!
 //! Ported from Iron Furnaces 4.3.2 (`Qelifern/IronFurnacesNeoForge` branch 4.3.2, Apache-2.0).
 //! [`runtime`] is the pure truth — the tier table, the cook/burn scaling and the furnace tick —
@@ -39,7 +40,7 @@ struct Mod;
 
 #[mod_api::horizon_mod]
 impl Hooks for Mod {
-    /// Declare what the game answers for the eight blocks (`EntityBlock` plus NeoForge's
+    /// Declare what the game answers for the twelve blocks (`EntityBlock` plus NeoForge's
     /// `RegisterCapabilitiesEvent`): one block entity type holding all of them, the Part that
     /// ticks it, and the three-slot furnace container on every tier.
     fn register(&self, r: &mut dyn Registrar, _cx: &RegistrationContext) {
