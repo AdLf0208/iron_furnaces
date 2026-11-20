@@ -8,8 +8,10 @@
 
 The upstream GitHub repository's default branch is the 1.20.1 tree, whose `LICENSE` says GPL-3.0; the 1.21.1 jar this port was written against declares Apache-2.0. The port follows the artefact: Apache-2.0, with the Apache text in `LICENSE`.
 
-The notice travels **inside the distributed archives**, not only in this source
-repository: the native bundle carries `mixins/ironfurnaces/LICENSE` and
-`mixins/ironfurnaces/LICENSE-NOTICE.md`, and the carried content mod carries
-`data/ironfurnaces/license/license.txt` and `data/ironfurnaces/license/notice.txt`
-(`tools/stamp_license.py` writes them from these two files before packaging).
+The notice travels **inside the distributed archive**, not only in this source
+repository: the package carries `LICENSE`, `LICENSE-NOTICE.md` and `NOTICE.txt`
+at its root. `NOTICE.txt` reproduces upstream's own `NOTICE.txt` verbatim —
+NeoForge, MinecraftForge, Forge, Actually Additions, Extra Utilities 2, McJty,
+CoFH and Minecraft — because Apache-2.0 section 4(d) requires a derivative work
+to carry the attribution notices of the work it redistributes (this package
+redistributes Iron Furnaces' assets and data).

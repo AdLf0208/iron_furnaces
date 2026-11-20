@@ -1,11 +1,11 @@
-# Package receipt — ironfurnaces 0.2.1
+# Package receipt — ironfurnaces 0.2.2
 
 | field | value |
 |---|---|
-| version | `0.2.1` |
+| version | `0.2.2` |
 | file | `ironfurnaces.hmod` |
-| bytes | 276,980 |
-| sha256 | `0b2a1f2b582c401b92930ecd864d74a057f4f3f47be402c93d2e186f4d7187f1` |
+| bytes | 281,821 |
+| sha256 | `71590264a3b1857466ff1b032856e1990fc2427ab564667e247438662b1250d7` |
 | source | this tag — the tree here is the source that produced the archive |
 | game | 26.3 |
 | horizon | `0b14f8acfd97fa2c750e42795249dcc981178ca4` |
@@ -13,6 +13,6 @@
 
 ## Verification of these exact bytes
 
-`cargo test` 22 passed / 0 failed · `clippy --all-targets -- -D warnings` 0 warnings · `check` `ironfurnaces 0.2.1 (native-mod, format native-1/0b14f8ac…/e59da909…, for 26.3)` exit 0 · `fits --build 0b14f8a` `0b14f8a made for` exit 0 · `verify-sdk-package.py` 1/1 (486 entries, no packed `Cargo.lock`) · launcher leg `PASS` + `EXIT:0`, control `EXIT:1`, `check-e2e-logs --strict` 2/2.
+`cargo test` 28 passed / 0 failed (the two new assertions failed 24/2 before the fix) · `clippy --all-targets -- -D warnings` 0 warnings · `fmt --check` clean · two builds `cmp`-identical · `check` exit 0 · `fits --build 0b14f8a` `made for` exit 0 · `fits` `0a875da fits` exit 0 · `verify-sdk-package.py` 1/1 · launcher leg `PASS` + `EXIT:0`; control `EXIT:1`; `SELFTEST=1` `EXIT:1`; `SELFTEST=2` (two-upgrade inversion) `EXIT:1`; the pre-fix run `EXIT:1` (`the two upgrades did not move the contents into the replacement in the same operation`); `check-e2e-logs --strict` 5/5.
 
-Earlier sections of `notes.md` describe earlier builds; where a digest there differs, this receipt is the one that matches the release asset.
+The archive carries upstream's third-party credits verbatim in `NOTICE.txt` at its root (Apache-2.0), and the e2e asserts them before launching.

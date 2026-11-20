@@ -1,0 +1,32 @@
+Iron Furnaces — third-party attribution notices.
+
+The original Iron Furnaces 4.3.2 distribution (ironfurnaces-neoforge-1.21.1-4.3.2.jar,
+Qelifern/IronFurnacesNeoForge branch 4.3.2) ships a NOTICE.txt. This port is a derivative
+work under the Apache License 2.0, whose section 4(d) requires it to carry those attribution
+notices, so they are reproduced verbatim below. This package redistributes Iron Furnaces'
+assets and data files, which is why the notices travel with it.
+
+--- upstream NOTICE.txt, verbatim ---
+
+This product may include software and/or assets developed by the following people, projects, and organizations,
+some of which have been modified by the Iron Furnaces development team:
+
+- NeoForge
+- MinecraftForge
+- Forge
+- Actually Additions
+- Extra Utilities 2
+- McJty
+- CoFH
+- Minecraft
+
+Each of these is the copyright of their respective authors and
+distributed under their own licenses. This NOTICE file is provided to
+give proper attribution as required by the licenses of these works.
+
+--- end of upstream NOTICE.txt ---
+
+The Horizon port itself is Copyright 2026 the Horizon port authors and is licensed under the
+Apache License 2.0; the licence text is in LICENSE and the provenance note is in
+LICENSE-NOTICE.md. Minecraft is a trademark of Mojang Studios. No Minecraft game code is
+included in this package.

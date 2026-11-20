@@ -11,13 +11,14 @@
 use std::sync::{Mutex, OnceLock};
 
 use mod_api::{
-    BlockEntityRef, BlockEntityTickEvent, BlockUpdateFlags, Command, CommandArgumentValue,
-    CommandInvocation, Compound, Direction, Flow, Hand, Host, HostSide, HostTransaction, ITEMS,
-    Identifier, InteractionResult, ItemPlace, ItemResource, ItemStack, LevelRef, ModContainer,
-    RecipeInput, RecipeMatch, Registrar, RunModCommandEvent, ServerHost, Tag, Text,
+    BlockEntityRef, BlockEntityTickEvent, BlockFace, BlockUpdateFlags, Command,
+    CommandArgumentValue, CommandInvocation, Compound, Direction, Flow, GameMode, Hand, Host,
+    HostSide, HostTransaction, ITEMS, Identifier, InteractionResult, ItemPlace, ItemResource,
+    ItemStack, LevelRef, ModContainer, RecipeInput, RecipeMatch, Registrar, RunModCommandEvent,
+    ServerHost, Tag, Text,
 };
 
-use crate::runtime::{FUEL, INPUT, OUTPUT, SLOTS, State, Tick, Tier, upgrade_target};
+use crate::runtime::{FUEL, INPUT, OUTPUT, SLOTS, State, Tick, Tier, UPGRADES, upgrade_target};
 
 /// The vanilla `furnace` class every tier block uses as its template, and the menu its container
 /// shows.
@@ -28,34 +29,93 @@ const BUCKET: &str = "minecraft:bucket";
 /// The bucket a wet sponge leaves in the fuel slot.
 const WATER_BUCKET: &str = "minecraft:water_bucket";
 
-/// What a queued upgrade must restore into the new tier's block entity after the block swap: its
-/// contents and its smelting state.
-struct Pending {
-    target: &'static str,
+/// A furnace's contents as an upgrade moves them from one tier to the next: the three slots and
+/// the smelting state.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Contents {
     items: Vec<Option<ItemStack>>,
     state: State,
 }
 
-/// Upgrades waiting for their new block entity's first tick, by dimension and position: the block
-/// entity a player's hook writes is not authoritative, so the restore runs from the block entity's
-/// own tick.
-static PENDING: Mutex<Vec<(String, [i32; 3], Pending)>> = Mutex::new(Vec::new());
-
-fn pending() -> std::sync::MutexGuard<'static, Vec<(String, [i32; 3], Pending)>> {
-    PENDING.lock().unwrap_or_else(|poison| poison.into_inner())
+impl Contents {
+    /// Three empty slots and a fresh state: what a freshly created replacement holds.
+    fn empty() -> Self {
+        Self {
+            items: vec![None; SLOTS],
+            state: State::default(),
+        }
+    }
 }
 
-/// Take the upgrade queued for one dimension and position, if any: the first tick of the new
-/// block entity is the only place the restore is authoritative.
-fn take_pending(
-    queue: &mut Vec<(String, [i32; 3], Pending)>,
-    dimension: &str,
-    pos: [i32; 3],
-) -> Option<Pending> {
-    let index = queue
-        .iter()
-        .position(|(dim, at, _)| dim == dimension && *at == pos)?;
-    Some(queue.remove(index).2)
+/// Upgrades waiting for their replacement's first tick, at most one per position. An upgrade
+/// that lands before the previous replacement ticked must carry the *earlier* snapshot, never
+/// the intermediate empty block entity. `T` is what one upgrade carries.
+struct Queued<T> {
+    entries: Vec<(String, [i32; 3], &'static str, T)>,
+}
+
+impl<T> Queued<T> {
+    const fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+        }
+    }
+
+    /// The contents queued for one position, if any: an earlier upgrade's replacement has not
+    /// ticked yet, so the block entity standing there is that empty replacement and this
+    /// snapshot is the truth.
+    fn peek(&self, dimension: &str, pos: [i32; 3]) -> Option<&T> {
+        self.entries
+            .iter()
+            .find(|(dim, at, _, _)| dim == dimension && *at == pos)
+            .map(|(_, _, _, carried)| carried)
+    }
+
+    /// Queue `carried` for one position, replacing any entry already queued there. Two upgrades
+    /// before a tick must leave **one** entry carrying the earlier snapshot, never two.
+    fn replace(&mut self, dimension: &str, pos: [i32; 3], target: &'static str, carried: T) {
+        self.entries
+            .retain(|(dim, at, _, _)| !(dim == dimension && *at == pos));
+        self.entries
+            .push((dimension.to_owned(), pos, target, carried));
+    }
+
+    /// Take the entry whose restore is still authoritative: the one queued for the block now
+    /// standing at `block`. An entry for another tier stays queued, so a mismatch never
+    /// discards contents.
+    fn take_for(&mut self, dimension: &str, pos: [i32; 3], block: &str) -> Option<T> {
+        let index = self
+            .entries
+            .iter()
+            .position(|(dim, at, target, _)| dim == dimension && *at == pos && *target == block)?;
+        Some(self.entries.remove(index).3)
+    }
+}
+
+/// The contents an upgrade carries: the snapshot an earlier upgrade queued for this position
+/// (its replacement has not ticked, so the live block entity is that empty replacement), else
+/// the live block entity's.
+fn carried<T: Clone>(queued: &Queued<T>, dimension: &str, pos: [i32; 3], live: T) -> T {
+    queued.peek(dimension, pos).cloned().unwrap_or(live)
+}
+
+/// Whether a player in `mode` may replace a furnace with an upgrade item: a spectator changes
+/// nothing, and an adventure player only where the game's own may-use rule allows the item at
+/// that block (`Player.mayUseItemAt`, the check `ItemStack.useOn` runs). Survival and creative
+/// always may.
+fn may_replace(mode: GameMode, may_use: Option<bool>) -> bool {
+    match mode {
+        GameMode::Spectator => false,
+        GameMode::Adventure => may_use == Some(true),
+        GameMode::Survival | GameMode::Creative => true,
+    }
+}
+
+/// Upgrades waiting for their replacement's first tick.
+static QUEUED: Mutex<Queued<Contents>> = Mutex::new(Queued::new());
+
+fn queued() -> std::sync::MutexGuard<'static, Queued<Contents>> {
+    QUEUED.lock().unwrap_or_else(|poison| poison.into_inner())
 }
 
 // ---------------------------------------------------------------------------
@@ -267,17 +327,43 @@ fn apply_pending(
     nbt: &mut Compound,
     items: &mut Vec<Option<ItemStack>>,
 ) {
-    let Some(upgrade) = take_pending(&mut pending(), dimension, pos) else {
+    let Some(block) = block_id(&*host, level, pos) else {
         return;
     };
-    if block_id(&*host, level, pos).as_deref() != Some(upgrade.target) {
+    let Some(contents) = queued().take_for(dimension, pos, &block) else {
         return;
-    }
-    *items = upgrade.items;
+    };
+    *items = contents.items;
     if items.len() < SLOTS {
         items.resize(SLOTS, None);
     }
-    write_state(nbt, upgrade.state);
+    write_state(nbt, contents.state);
+}
+
+/// Move `contents` into the block entity at `pos`, all or nothing: every slot and the saved state
+/// in one transaction, so a failure leaves the replacement as it was and the caller can queue the
+/// contents instead. Returns whether the replacement took them.
+fn install_contents(
+    host: &mut dyn ServerHost,
+    level: LevelRef,
+    pos: [i32; 3],
+    contents: &Contents,
+) -> bool {
+    let mut state = Compound::new();
+    write_state(&mut state, contents.state);
+    host.transaction(|host, tx| -> Result<bool, ()> {
+        let Some(entity) = host.block_entity(level, pos) else {
+            return Ok(false);
+        };
+        for (slot, stack) in contents.items.iter().enumerate() {
+            entity
+                .set_item_slot(host, tx, slot as u32, stack.clone())
+                .map_err(|_| ())?;
+        }
+        entity.merge_data(host, state.clone()).map_err(|_| ())?;
+        Ok(true)
+    })
+    .unwrap_or(false)
 }
 
 /// The block id at `pos`, or none outside a loaded block.
@@ -386,76 +472,108 @@ pub fn right_click(host: HostSide<'_>, event: &mut mod_api::RightClickBlockEvent
     let Some(level) = player.level(&*server) else {
         return Flow::Continue;
     };
+    // The game mode is checked before anything is read, replaced or consumed: a spectator must
+    // change nothing, and an adventure player only where the game's own may-use rule allows the
+    // item at this block (`Player.mayUseItemAt`, the check `ItemStack.useOn` runs).
+    let Some(mode) = player.game_mode(&*server) else {
+        return Flow::Continue;
+    };
+    let may_use = match (mode, face_of(click.hit.face)) {
+        (GameMode::Adventure, Some(face)) => player.may_use_item_at(&*server, pos, face, &held),
+        (GameMode::Adventure, None) => None,
+        _ => Some(true),
+    };
+    if !may_replace(mode, may_use) {
+        return Flow::Continue;
+    }
     let Some(source) = block_id(&*server, level, pos) else {
         return Flow::Continue;
     };
     let Some(target) = upgrade_target(&source, &held.item().id(&*server)) else {
         return Flow::Continue;
     };
-    let Some(current) = level.block_state(&*server, pos) else {
-        return Flow::Continue;
-    };
-    let Some(next) = server
-        .block_state_string(current)
-        .and_then(|state| target_state_name(&state, target))
-        .and_then(|state| server.block_state_id(&state))
-    else {
-        return Flow::Continue;
-    };
-    let (items, state) = capture(&mut *server, level, pos);
-    if !level
-        .set_block(&mut *server, pos, next, upgrade_flags())
-        .unwrap_or(false)
-    {
+    // One upgrade item, unless the player is creative (their hand gives without losing any).
+    let take = (
+        ItemPlace::PlayerHand {
+            player: click.player,
+            hand: click.hand,
+        },
+        ItemResource::of(&held),
+    );
+    if !apply_upgrade(&mut *server, level, pos, target, Some(take)) {
         return Flow::Continue;
     }
-    pending().push((
-        server.dimension().to_owned(),
-        pos,
-        Pending {
-            target,
-            items,
-            state,
-        },
-    ));
-    // One upgrade item, unless the player is creative (their hand gives without losing any).
-    let place = ItemPlace::PlayerHand {
-        player: click.player,
-        hand: click.hand,
-    };
-    let resource = ItemResource::of(&held);
-    let _ = server
-        .transaction(|host, tx| -> Result<u32, ()> { Ok(place.extract(host, tx, &resource, 1)) });
     *event.cancellation_result = InteractionResult::Success;
     Flow::Cancel
 }
 
+/// Replace the furnace at `pos` with `target` and move its contents across in the same operation:
+/// the contents are written into the replacement's block entity in one transaction, right after
+/// the block swap, so no ordering of upgrades can leave them in a snapshot the next upgrade no
+/// longer sees. `take` names the hand the upgrade item comes from (one item is consumed unless
+/// the player is creative); the harness command passes `None`. Returns whether the block changed.
+fn apply_upgrade(
+    host: &mut dyn ServerHost,
+    level: LevelRef,
+    pos: [i32; 3],
+    target: &'static str,
+    take: Option<(ItemPlace, ItemResource)>,
+) -> bool {
+    let Some(current) = level.block_state(&*host, pos) else {
+        return false;
+    };
+    let Some(next) = host
+        .block_state_string(current)
+        .and_then(|state| target_state_name(&state, target))
+        .and_then(|state| host.block_state_id(&state))
+    else {
+        return false;
+    };
+    let dimension = host.dimension().to_owned();
+    let contents = carried(&queued(), &dimension, pos, capture(host, level, pos));
+    if !level
+        .set_block(host, pos, next, upgrade_flags())
+        .unwrap_or(false)
+    {
+        return false;
+    }
+    if !install_contents(host, level, pos, &contents) {
+        // The replacement could not take the contents synchronously (no block entity yet, or a
+        // stale handle): queue them for its first tick. `replace` keeps one entry per position,
+        // so a second upgrade carries this snapshot rather than the empty replacement.
+        queued().replace(&dimension, pos, target, contents);
+    }
+    if let Some((place, resource)) = take {
+        let _ = host.transaction(|host, tx| -> Result<u32, ()> {
+            Ok(place.extract(host, tx, &resource, 1))
+        });
+    }
+    true
+}
+
 /// The flags of an upgrade's block replacement: neighbours and clients see the new block, and the
 /// removed block entity's side effects are skipped, so its container does **not** spill its three
-/// slots onto the floor while [`apply_pending`] restores that same snapshot into the new tier. A
-/// spill plus the restore is the duplicated inventory the reviewer found: every upgrade minted a
-/// second copy of everything the furnace held.
+/// slots onto the floor while [`apply_upgrade`] moves that same snapshot into the new tier (and
+/// [`apply_pending`] is only the fallback for a replacement that could not take it). A spill plus
+/// the transfer is the duplicated inventory the reviewer found: every upgrade minted a second copy
+/// of everything the furnace held.
 fn upgrade_flags() -> BlockUpdateFlags {
     BlockUpdateFlags::NEIGHBORS
         | BlockUpdateFlags::CLIENTS
         | BlockUpdateFlags::SKIP_BLOCK_ENTITY_SIDE_EFFECTS
 }
 
-/// The source block's contents and smelting state. A vanilla furnace keeps only its three slots
-/// (upstream starts the new tier with empty ones, and this port keeps them); a mod furnace keeps
-/// its saved state too.
-fn capture(
-    host: &mut dyn ServerHost,
-    level: LevelRef,
-    pos: [i32; 3],
-) -> (Vec<Option<ItemStack>>, State) {
+/// The source block's contents. A vanilla furnace keeps only its three slots (upstream starts
+/// the new tier with empty ones, and this port keeps them); a mod furnace keeps its saved state
+/// too.
+fn capture(host: &mut dyn ServerHost, level: LevelRef, pos: [i32; 3]) -> Contents {
     let block = block_id(&*host, level, pos);
     if block
         .as_deref()
         .is_some_and(|id| Tier::from_block(id).is_some())
     {
         let Some(entity) = host.block_entity(level, pos) else {
-            return (vec![None; SLOTS], State::default());
+            return Contents::empty();
         };
         let state = entity
             .data(&*host)
@@ -463,21 +581,21 @@ fn capture(
         let items = (0..SLOTS as u32)
             .map(|slot| entity.item_slot(&*host, slot).ok().flatten())
             .collect();
-        return (items, state);
+        return Contents { items, state };
     }
     if block.as_deref() == Some(VANILLA_FURNACE) {
         // The vanilla furnace's `WorldlyContainer` sides: up reaches the input, the horizontal
         // faces the fuel, down the output.
-        return (
-            vec![
+        return Contents {
+            items: vec![
                 furnace_slot(host, level, pos, Direction::Up),
                 furnace_slot(host, level, pos, Direction::North),
                 furnace_slot(host, level, pos, Direction::Down),
             ],
-            State::default(),
-        );
+            state: State::default(),
+        };
     }
-    (vec![None; SLOTS], State::default())
+    Contents::empty()
 }
 
 /// Slot 0 of the item handler a face of the block at `pos` reaches, as a stack.
@@ -490,6 +608,19 @@ fn furnace_slot(
     let handler = level.capability(host, &ITEMS, pos, Some(side))?;
     let amount = handler.amount(host, 0);
     handler.resource(host, 0)?.to_stack(amount)
+}
+
+/// The `BlockFace` a click's face names. `BlockHit.face` is the clicked face's normal vector.
+fn face_of(normal: [i32; 3]) -> Option<BlockFace> {
+    Some(match normal {
+        [0, -1, 0] => BlockFace::Down,
+        [0, 1, 0] => BlockFace::Up,
+        [0, 0, -1] => BlockFace::North,
+        [0, 0, 1] => BlockFace::South,
+        [-1, 0, 0] => BlockFace::West,
+        [1, 0, 0] => BlockFace::East,
+        _ => return None,
+    })
 }
 
 /// The state an upgrade writes: the target block, the source's `facing`, unlit and with the jar's
@@ -523,9 +654,19 @@ fn item_key(host: &dyn Host, id: &str) -> Option<mod_api::ItemKey> {
 /// `/ironfurnaces info <pos>`: the harness readout. It names another furnace's input, fuel and
 /// output anywhere in the level, so it is registered at the operator level `/data get block`
 /// needs (2, game master) and its body asks again before reading anything.
+///
+/// `/ironfurnaces upgrade <pos> <steps>`: the harness driver for the upgrade path. It applies
+/// `steps` tier upgrades at one position inside one server call, which a headless client cannot
+/// do with clicks (a click is a client input answered two ticks later, so two of them are always
+/// in different ticks). It shares [`apply_upgrade`] with the click, so the ordering it exercises
+/// is the click's.
 pub fn declare_commands(commands: &mut Vec<Command>) {
     commands.push(Command::op(
         "ironfurnaces info <pos:block_pos>",
+        OPERATOR_LEVEL,
+    ));
+    commands.push(Command::op(
+        "ironfurnaces upgrade <pos:block_pos> <steps:integer>",
         OPERATOR_LEVEL,
     ));
 }
@@ -558,9 +699,83 @@ pub fn run_command(host: &mut dyn ServerHost, event: &mut RunModCommandEvent<'_>
             let line = readout(host, pos);
             say(host, &line);
         }
+        ["ironfurnaces", "upgrade"] => {
+            if !may_read(event.source.permission()) {
+                say(
+                    host,
+                    &format!(
+                        "ironfurnaces upgrade needs an operator (permission level {OPERATOR_LEVEL})"
+                    ),
+                );
+                return Flow::Cancel;
+            }
+            let Some(pos) = block_pos(invocation, "pos") else {
+                say(host, "Usage: /ironfurnaces upgrade <x> <y> <z> <steps>");
+                return Flow::Cancel;
+            };
+            let steps = integer(invocation, "steps").unwrap_or(1);
+            let line = upgrade_steps(host, pos, steps);
+            say(host, &line);
+        }
         _ => say(host, "Usage: /ironfurnaces info <x> <y> <z>"),
     }
     Flow::Cancel
+}
+
+/// `/ironfurnaces upgrade <pos> <steps>`: apply `steps` upgrades of the jar's chain at one
+/// position, in this one server call, and report what happened — including the replacement's
+/// slots **as they are now**, before any tick. Those slots are what proves the contents moved
+/// with the block rather than waiting in a queue for the replacement's first tick.
+fn upgrade_steps(host: &mut dyn ServerHost, pos: [i32; 3], steps: i32) -> String {
+    let Some(level) = host.level(host.dimension()) else {
+        return NO_FURNACE.to_owned();
+    };
+    let mut done = 0;
+    let mut reached = "none".to_owned();
+    for _ in 0..steps.clamp(1, Tier::ALL.len() as i32) {
+        let Some(block) = block_id(&*host, level, pos) else {
+            break;
+        };
+        let Some(next) = next_tier(&block) else {
+            break;
+        };
+        if !apply_upgrade(host, level, pos, next, None) {
+            break;
+        }
+        done += 1;
+        reached = next.to_owned();
+    }
+    let slots = host.block_entity(level, pos).map_or_else(
+        || "no-block-entity".to_owned(),
+        |entity| {
+            (0..SLOTS)
+                .map(|slot| slot_text(entity, &*host, slot))
+                .collect::<Vec<_>>()
+                .join(",")
+        },
+    );
+    format!(
+        "ironfurnaces upgrade {} {} {} steps={done} block={reached} slots={slots}",
+        pos[0], pos[1], pos[2]
+    )
+}
+
+/// The tier the jar's upgrade chain takes `source` to next: the first registered upgrade whose
+/// source is that block. The chain is not a single line (diamond has two), so this follows the
+/// jar's registration order.
+fn next_tier(source: &str) -> Option<&'static str> {
+    UPGRADES
+        .iter()
+        .find(|upgrade| upgrade.from == source)
+        .map(|upgrade| upgrade.to)
+}
+
+/// An `integer` argument of a command invocation.
+fn integer(invocation: &CommandInvocation, name: &str) -> Option<i32> {
+    match invocation.argument(name)? {
+        CommandArgumentValue::Integer(value) => Some(*value),
+        _ => None,
+    }
 }
 
 /// The tier, position, burn/cook counters and the three slots, as `/ironfurnaces info` prints them.
@@ -771,19 +986,148 @@ mod tests {
 
     #[test]
     fn a_queued_upgrade_is_taken_only_at_its_own_dimension_and_position() {
-        let mut queue = vec![(
-            "minecraft:overworld".to_owned(),
+        let mut queue: Queued<Vec<&str>> = Queued::new();
+        queue.replace(
+            "minecraft:overworld",
             [1, 64, 2],
-            Pending {
-                target: "ironfurnaces:iron_furnace",
-                items: vec![None; SLOTS],
-                state: State::default(),
-            },
-        )];
-        assert!(take_pending(&mut queue, "minecraft:the_end", [1, 64, 2]).is_none());
-        assert!(take_pending(&mut queue, "minecraft:overworld", [2, 64, 2]).is_none());
-        assert_eq!(queue.len(), 1, "another position's upgrade is left queued");
-        assert!(take_pending(&mut queue, "minecraft:overworld", [1, 64, 2]).is_some());
-        assert!(queue.is_empty(), "the taken upgrade leaves the queue");
+            "ironfurnaces:iron_furnace",
+            Vec::new(),
+        );
+        assert!(
+            queue
+                .take_for("minecraft:the_end", [1, 64, 2], "ironfurnaces:iron_furnace")
+                .is_none()
+        );
+        assert!(
+            queue
+                .take_for(
+                    "minecraft:overworld",
+                    [2, 64, 2],
+                    "ironfurnaces:iron_furnace"
+                )
+                .is_none()
+        );
+        assert_eq!(
+            queue.entries.len(),
+            1,
+            "another position's upgrade is left queued"
+        );
+        // A different tier at the same position is not this entry's block: it stays queued.
+        assert!(
+            queue
+                .take_for(
+                    "minecraft:overworld",
+                    [1, 64, 2],
+                    "ironfurnaces:gold_furnace"
+                )
+                .is_none()
+        );
+        assert_eq!(queue.entries.len(), 1, "a mismatch never discards contents");
+        assert!(
+            queue
+                .take_for(
+                    "minecraft:overworld",
+                    [1, 64, 2],
+                    "ironfurnaces:iron_furnace"
+                )
+                .is_some()
+        );
+        assert!(
+            queue.entries.is_empty(),
+            "the taken upgrade leaves the queue"
+        );
+    }
+
+    /// Reviewer finding 1 (`src/support.rs:405`): two upgrades before the furnace ticks wiped all
+    /// three slots. The second upgrade snapshotted the already-empty replacement, so on tick the
+    /// first snapshot was dropped (its tier no longer matched) and the empty one was restored.
+    #[test]
+    fn a_second_upgrade_before_the_tick_carries_the_first_snapshot() {
+        const DIM: &str = "minecraft:the_end";
+        const POS: [i32; 3] = [16, 64, -8];
+        const IRON: &str = "ironfurnaces:iron_furnace";
+        const GOLD: &str = "ironfurnaces:gold_furnace";
+        let original = vec![
+            "minecraft:raw_iron:2",
+            "minecraft:coal:1",
+            "minecraft:iron_ingot:1",
+        ];
+
+        // The first upgrade (copper -> iron) carries the furnace's contents.
+        let mut queue: Queued<Vec<&str>> = Queued::new();
+        let first = carried(&queue, DIM, POS, original.clone());
+        queue.replace(DIM, POS, IRON, first);
+
+        // The second upgrade (iron -> gold) lands before the replacement ticked: the live block
+        // entity is that empty replacement, so the snapshot to carry is the queued one.
+        let empty = Vec::new();
+        let second = carried(&queue, DIM, POS, empty);
+        queue.replace(DIM, POS, GOLD, second.clone());
+        assert_eq!(
+            second, original,
+            "the second upgrade carried the empty replacement instead of the first snapshot"
+        );
+        assert_eq!(
+            queue.entries.len(),
+            1,
+            "one entry per position: a second upgrade replaces the first"
+        );
+
+        // The gold block's first tick restores the contents exactly once.
+        let restored = queue.take_for(DIM, POS, GOLD);
+        assert_eq!(
+            restored,
+            Some(original.clone()),
+            "the tick restored the stale/empty snapshot"
+        );
+        assert!(queue.entries.is_empty(), "the restore consumed the entry");
+    }
+
+    /// Reviewer finding 2 (`src/support.rs:371`): a spectator holding an upgrade could replace a
+    /// furnace, and the hook ran before Adventure mode's may-use check.
+    #[test]
+    fn a_spectator_or_a_refused_adventure_use_cannot_replace_a_furnace() {
+        assert!(!may_replace(GameMode::Spectator, None));
+        assert!(
+            !may_replace(GameMode::Spectator, Some(true)),
+            "a spectator may not replace a furnace even where may-use would pass"
+        );
+        assert!(!may_replace(GameMode::Adventure, None));
+        assert!(!may_replace(GameMode::Adventure, Some(false)));
+        assert!(may_replace(GameMode::Adventure, Some(true)));
+        assert!(may_replace(GameMode::Survival, None));
+        assert!(may_replace(GameMode::Creative, None));
+    }
+
+    #[test]
+    fn a_clicks_face_normal_names_the_block_face() {
+        assert_eq!(face_of([0, 1, 0]), Some(BlockFace::Up));
+        assert_eq!(face_of([0, 0, 1]), Some(BlockFace::South));
+        assert_eq!(face_of([1, 0, 0]), Some(BlockFace::East));
+        assert_eq!(face_of([0, 0, 0]), None);
+    }
+
+    #[test]
+    fn the_harness_upgrade_command_follows_the_jars_chain() {
+        assert_eq!(
+            next_tier("minecraft:furnace"),
+            Some("ironfurnaces:iron_furnace")
+        );
+        assert_eq!(
+            next_tier("ironfurnaces:copper_furnace"),
+            Some("ironfurnaces:iron_furnace")
+        );
+        assert_eq!(
+            next_tier("ironfurnaces:iron_furnace"),
+            Some("ironfurnaces:gold_furnace")
+        );
+        // Diamond's first registered upgrade is emerald (crystal is the other branch).
+        assert_eq!(
+            next_tier("ironfurnaces:diamond_furnace"),
+            Some("ironfurnaces:emerald_furnace")
+        );
+        // The chain ends at netherite, and a non-furnace has no next tier.
+        assert_eq!(next_tier("ironfurnaces:netherite_furnace"), None);
+        assert_eq!(next_tier("minecraft:stone"), None);
     }
 }

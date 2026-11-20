@@ -508,3 +508,185 @@ File: `var/review-all/1238-ironfurnaces.md` (**held until fixed: this blocked li
 In-game: `PASS` + `E2E EXIT:0` (`ports/_shared/evidence/ironfurnaces-e2e/e2e-launcher.log`), control
 `EXIT:1`. The upgrade phase now also asserts **zero item entities** beside the upgraded furnace
 (the spill the reviewer found) and the de-op phase is the readout gate.
+
+## Review fixes (2026-11-21) — #1238 second review: 0.2.2
+
+Skills: superpowers/using-superpowers,test-driven-development,systematic-debugging,verification-before-completion; BeautifulRust/rust-best-practices
+
+Brief: `var/round-1121/brief-ironfurnaces-0.2.2.md`; review at `1433d37e` (2026-11-20 22:36, `#1238`).
+Package **0.2.2**, `ironfurnaces.hmod` **281,821 B**, sha256
+`71590264a3b1857466ff1b032856e1990fc2427ab564667e247438662b1250d7`, **487 entries**, no packed
+`Cargo.lock`. Pin unchanged (`0b14f8a` + `e59da90`, for 26.3); `src/runtime.rs` byte-identical
+(`2efd8c89bc21a5a4c6400d47724741c4968101a9acf01c4d009660841736bb29`, also inside the archive).
+
+### 1. The upgrade's transfer is atomic (reviewer finding 1)
+
+**The bug.** The click snapshotted the old inventory, called `set_block`, and restored the snapshot
+from the replacement's first tick. A second upgrade before that tick snapshotted the already-empty
+replacement; on tick the first snapshot was taken, its tier no longer matched, and it was
+discarded — then the empty one was restored. All three slots lost.
+
+**Mechanism chosen — the contents move with the block, in the handler.** `apply_upgrade` writes
+the captured contents into the replacement's block entity **in the same call**, in one
+`host.transaction`: `BlockEntityRef::set_item_slot` for the three slots and `merge_data` for
+`BurnTime`/`BurnTimeTotal`/`CookTime`/`CookTimeTotal`. The transaction is all-or-nothing, so a
+replacement that cannot take them is left untouched. Only when that write fails (no block entity
+yet, or a stale handle) are the contents queued for the replacement's first tick — and that
+fallback keeps **one entry per position** (`Queued::replace`), carries the *earlier* snapshot
+forward (`Queued::peek`), and the tick takes only the entry queued for the block standing there
+(`Queued::take_for`), so a tier mismatch can never discard contents. Both halves are
+regression-tested; the in-game assertion reads the replacement's slots **inside the same server
+call**, which is what proves the atomic path (not the fallback) ran.
+
+**Red, unit (`sdk-test-red-0.2.2.log`), before the fix:**
+
+```
+test support::tests::a_second_upgrade_before_the_tick_carries_the_first_snapshot ... FAILED
+...
+thread 'support::tests::a_second_upgrade_before_the_tick_carries_the_first_snapshot' panicked at src/support.rs:883:9:
+assertion `left == right` failed: the second upgrade carried the empty replacement instead of the first snapshot
+  left: []
+ right: ["minecraft:raw_iron:2", "minecraft:coal:1", "minecraft:iron_ingot:1"]
+...
+test result: FAILED. 24 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+**Red, in game, against the pre-fix transfer** (`../_shared/evidence/ironfurnaces-e2e/e2e-launcher-prefix-red.log`;
+a scratch copy of this port with today's transfer, the same harness command, two upgrades in one
+server call, the same e2e script):
+
+```
+  info(20,64,-8) before the two upgrades: ironfurnaces copper 20 64 -8 burn=1250/1440 cook=11/180 input=minecraft:raw_iron:2 fuel=minecraft:coal:1 output=minecraft:iron_ingot:1
+  ironfurnaces upgrade 20 64 -8 steps=2 block=ironfurnaces:gold_furnace slots=none,none,none
+FAIL: the two upgrades did not move the contents into the replacement in the same operation: ironfurnaces upgrade 20 64 -8 steps=2 block=ironfurnaces:gold_furnace slots=none,none,none
+EXIT:1
+```
+
+The reply is read inside the upgrade's own call, so `slots=none,none,none` is the defect itself:
+the pre-fix transfer had queued the contents for a tick that had not come. (The earlier pre-fix
+run of the same copy, before this assertion existed, failed one step later on the post-tick
+`info` with `input=none fuel=none output=none` — the same loss seen from the player's side.)
+
+**Green, in game, 0.2.2** (`../_shared/evidence/ironfurnaces-e2e/e2e-launcher.log`):
+
+```
+  ironfurnaces upgrade 20 64 -8 steps=2 block=ironfurnaces:gold_furnace slots=minecraft:raw_iron:2,minecraft:coal:1,minecraft:iron_ingot:1
+  block(20,64,-8) after two upgrades in one tick: ironfurnaces:gold_furnace
+  info(20,64,-8) after two upgrades in one tick: ironfurnaces gold 20 64 -8 burn=1228/1440 cook=33/120 input=minecraft:raw_iron:2 fuel=minecraft:coal:1 output=minecraft:iron_ingot:1
+  item entities beside the twice-upgraded furnace: 0
+```
+
+The reply line is read inside the upgrade's own server call: the slots are already in the
+replacement before any tick, and the burn/cook state moved with them. `SELFTEST=2` inverts that
+assertion and the leg ends `EXIT:1` (`e2e-launcher-selftest-upgrades.log`).
+
+### 2. Game mode first (reviewer finding 2)
+
+`right_click` asks the game mode before it reads, replaces or consumes anything:
+`may_replace(mode, may_use)` — `Spectator` never replaces; `Adventure` only where
+`PlayerRef::may_use_item_at` (the check `ItemStack.useOn` runs) allows the item at that block;
+`Survival`/`Creative` always may. The click's face normal is mapped to `BlockFace` for that call.
+
+Red, unit (`sdk-test-red-0.2.2.log`): `assertion failed: !may_replace(GameMode::Spectator, None)`.
+
+Green, in game (`e2e-launcher.log`) — one furnace, one held upgrade item, three modes:
+
+```
+  block(24,64,-8) after a spectator's click: ironfurnaces:copper_furnace
+  info(24,64,-8): ironfurnaces copper 24 64 -8 burn=0/0 cook=0/180 input=minecraft:raw_iron:1 fuel=none output=none
+  a spectator's upgrade item: 1 -> 1
+  block(24,64,-8) after an adventure player's click: ironfurnaces:copper_furnace
+  block(24,64,-8) after a survival player's click: ironfurnaces:iron_furnace
+  a survival player's upgrade item: 1 -> 0
+```
+
+The survival click is the differential: the guard is not simply refusing everything. The adventure
+click opened the furnace's own menu (`screen: container` in the transcript), which is the game's
+own use, not the upgrade.
+
+### 3. Upstream's NOTICE travels in the package (reviewer finding 3)
+
+`NOTICE.txt` at the package root reproduces upstream's own `NOTICE.txt` verbatim (NeoForge,
+MinecraftForge, Forge, Actually Additions, Extra Utilities 2, McJty, CoFH, Minecraft) and records
+that Apache-2.0 section 4(d) is why it travels; `LICENSE-NOTICE.md` points at it. The SDK packs a
+root file whose name starts with `NOTICE` (`horizon-mod-package`'s `source_file`), so it is inside
+the archive, not only beside the source (`sdk-archive.txt`):
+
+```
+$ unzip -p ironfurnaces.hmod NOTICE.txt | grep -nE 'NeoForge|MinecraftForge|Forge|Actually Additions|Extra Utilities 2|McJty|CoFH|Minecraft'
+14:- NeoForge
+15:- MinecraftForge
+16:- Forge
+17:- Actually Additions
+18:- Extra Utilities 2
+19:- McJty
+20:- CoFH
+21:- Minecraft
+$ unzip -p ironfurnaces.hmod LICENSE | head -2
+Apache License
+Version 2.0, January 2004
+```
+
+The e2e asserts the credits inside the archive before it launches the game (`e2e-launcher.log`
+line 5), so a package rebuilt without them fails the leg.
+
+### Harness addition (this slice)
+
+`/ironfurnaces upgrade <pos> <steps>` (operator level 2, beside `/ironfurnaces info`): applies
+`steps` upgrades of the jar's chain at one position **inside one server call** and reports the
+replacement's slots as they are then. A headless client cannot deliver two clicks in one tick (a
+click is a client input answered two ticks later), so this is the only way to exercise the
+reviewer's ordering deterministically. It shares `apply_upgrade` with the click, consumes no item,
+and `next_tier` follows the jar's registration order (diamond's first upgrade is emerald).
+
+### Ladder (this slice)
+
+| Step | Command (through `build-slot.sh`) | Result |
+|---|---|---|
+| red | `cargo test --offline` | **24 passed, 2 failed** — the two new tests (`sdk-test-red-0.2.2.log`) |
+| tests | `cargo test --offline` | **28 passed, 0 failed** (`sdk-test.log`) |
+| fmt | `rustfmt --check src/{lib,support}.rs` + `cargo fmt --check` | exit 0 (`sdk-fmt.log`) |
+| clippy | `cargo clippy --all-targets --offline -- -D warnings` | exit 0, 0 warnings (`sdk-clippy.log`) |
+| build ×2 | `rm -f Cargo.lock && cargo horizon-mod build` (twice) | 281,821 B, `cmp` identical, sha256 `71590264…50d7` (`sdk-build.log`, `sdk-build-second.log`) |
+| registry check | `cargo horizon-mod check ironfurnaces.hmod` | `ironfurnaces 0.2.2 (native-mod, format native-1/0b14f8a…/e59da90…, for 26.3)`, 281821 bytes, `EXIT:0` (`sdk-check.log`, `sdk-check-json.log`) |
+| fits, the pin | `cargo horizon-mod fits ironfurnaces.hmod --build 0b14f8a` | `0b14f8a  made for`, `EXIT:0` (`sdk-fits.log`) |
+| fits, a different build | `cargo horizon-mod fits ironfurnaces.hmod` (newest nightly) | `0a875da  fits`, `EXIT:0` (`sdk-fits-other.log`) |
+| in-game | `launcher-game.sh build` + `build-slot.sh run --step e2e -- tools/e2e.sh` | `PASS` + `EXIT:0` (`e2e-launcher.log`) |
+| in-game red | the same leg on the pre-fix transfer | `FAIL` + `EXIT:1` (`e2e-launcher-prefix-red.log`) |
+| control | the same leg on the unmodified Nightly | `EXIT:1` (the ids are unknown; `e2e-launcher-control.log`) |
+| selftest | `SELFTEST=1` / `SELFTEST=2` | `EXIT:1` each (`e2e-launcher-selftest.log`, `-selftest-upgrades.log`) |
+| log audit | `check-e2e-logs.py ironfurnaces-e2e --strict` | `logs=5 ok=5`, exit 0 |
+| package audit | `verify-sdk-package.py ironfurnaces` | **1/1** |
+
+### Traps this slice hit
+
+1. **`launcher-game.sh` can export a stale build when two builds share a manifest.** Its
+   `built_tag` falls back to the newest installed `native-*` version whose `horizon-mod.toml` is
+   byte-identical to the port's, and it does **not** compare `src/`. The pre-fix scratch copy had
+   the same manifest, so after the fix `build` exported the pre-fix game and the green leg failed
+   with the bug — a real trap, not a flake. Remedy: delete the scratch copy's version tags
+   (`rm -rf ~/.cache/horizon-e2e/root/data/horizon-launcher/versions/native-0b14f8a-<hash>`), or
+   verify the export directly:
+   `grep -c install_contents ~/.cache/horizon-e2e/0b14f8a/ironfurnaces/horizon-native-mods/ironfurnaces/src/support.rs`
+   must be non-zero and `let _ = install_contents` must be absent.
+2. **`cargo clippy`/`cargo test` write a `Cargo.lock`, and the packer ships a root `Cargo.lock`**
+   (`source_file` accepts it). `rm -f Cargo.lock` right before each `cargo horizon-mod build`, and
+   leave the port without one; the artifact is 487 entries with none.
+
+### Coverage (parity rule)
+
+| Family (jar) | Result |
+|---|---|
+| smelting with fuel, tier speed, coal-scaled burn | tested (`e2e-launcher.log`: netherite finishes before iron, iron later, `burn=…/…`) |
+| no-fuel and non-smeltable controls | tested (both stay `cook=0/…`, no output) |
+| vanilla furnace menu, 3 slots, result withdrawal | tested (`screen=container`, 3 slots, ingot withdrawn to the inventory) |
+| tier upgrade by right-click, contents + progress kept, item consumed | tested (`block=iron_furnace`, `input=raw_iron:2`, item 1→0, 0 spilled) |
+| two upgrades before a tick | tested (slots read inside the call, post-tick `info`, `SELFTEST=2` inverts it, and the pre-fix run fails) |
+| spectator / adventure / survival guard | tested (three modes, survival is the differential) |
+| `/ironfurnaces info` operator gate | tested (de-op refusal, then the readout as an operator) |
+| third-party credits inside the package | tested (`unzip -p … NOTICE.txt` asserted in the leg) |
+| `lit` block state | tested (the block states in every transcript carry `lit=true/false`) |
+| carried recipes (8 tier + 10 upgrade + 2 furnaces) | **not exercised in game yet** — carried and validated by `horizon-port-pack check`, and the furnace smelts `minecraft:smelting` in game, but there is no crafting-table leg; next slice |
+| comparator output | not tested (the container path is vanilla's) |
+| augments, factory, generator, settings GUI, auto IO, redstone modes, XP | not ported (see the 0.1.0 gaps; unchanged) |
+| silver / allthemodium / vibranium / unobtainium / rainbow tiers | not ported (need other mods' materials; assets carried inert) |

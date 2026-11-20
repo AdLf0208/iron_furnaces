@@ -85,7 +85,9 @@ impl BlockEntityPart for Furnace {
         event.ticks = true;
     }
 
-    /// One server tick: apply a queued upgrade, then smelt.
+    /// One server tick: apply an upgrade the replacement could not take synchronously, then
+    /// smelt. The upgrade itself moves the contents in its own call (`support::apply_upgrade`);
+    /// the queue is only the fallback for a replacement that had no block entity yet.
     fn block_entity_tick(&self, host: &mut dyn ServerHost, event: &mut BlockEntityTickEvent<'_>) {
         support::tick(host, event);
     }
