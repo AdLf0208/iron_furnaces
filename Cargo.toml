@@ -8,7 +8,7 @@
 #
 # Cargo's name and version are not the mod's identity: horizon-mod.toml is.
 name = "ironfurnaces"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 license = "Apache-2.0"
 description = "Iron Furnaces for Horizon: tiered fuel furnaces from copper to netherite"

@@ -69,9 +69,11 @@ pub fn declare(r: &mut dyn Registrar) {
     let kind = r.block_entity_type("furnace").blocks(&names).build();
     for tier in Tier::ALL {
         let block = r.block_key(tier.block_id());
-        r.block_part(block, crate::Furnace);
         r.block_container(&block, container());
     }
+    // `block_entity_part` attaches the Part to every block of the type, so a `block_part`
+    // per block here would attach it twice and the game refuses a duplicate
+    // ("attached twice, by ironfurnaces and ironfurnaces").
     r.block_entity_part(&kind, crate::Furnace)
         .expect("the furnaces' Part attaches to the type this mod just declared");
 }
@@ -401,9 +403,8 @@ pub fn right_click(host: HostSide<'_>, event: &mut mod_api::RightClickBlockEvent
         return Flow::Continue;
     };
     let (items, state) = capture(&mut *server, level, pos);
-    let flags = BlockUpdateFlags::NEIGHBORS | BlockUpdateFlags::CLIENTS;
     if !level
-        .set_block(&mut *server, pos, next, flags)
+        .set_block(&mut *server, pos, next, upgrade_flags())
         .unwrap_or(false)
     {
         return Flow::Continue;
@@ -427,6 +428,17 @@ pub fn right_click(host: HostSide<'_>, event: &mut mod_api::RightClickBlockEvent
         .transaction(|host, tx| -> Result<u32, ()> { Ok(place.extract(host, tx, &resource, 1)) });
     *event.cancellation_result = InteractionResult::Success;
     Flow::Cancel
+}
+
+/// The flags of an upgrade's block replacement: neighbours and clients see the new block, and the
+/// removed block entity's side effects are skipped, so its container does **not** spill its three
+/// slots onto the floor while [`apply_pending`] restores that same snapshot into the new tier. A
+/// spill plus the restore is the duplicated inventory the reviewer found: every upgrade minted a
+/// second copy of everything the furnace held.
+fn upgrade_flags() -> BlockUpdateFlags {
+    BlockUpdateFlags::NEIGHBORS
+        | BlockUpdateFlags::CLIENTS
+        | BlockUpdateFlags::SKIP_BLOCK_ENTITY_SIDE_EFFECTS
 }
 
 /// The source block's contents and smelting state. A vanilla furnace keeps only its three slots
@@ -508,9 +520,14 @@ fn item_key(host: &dyn Host, id: &str) -> Option<mod_api::ItemKey> {
 // The readout command
 // ---------------------------------------------------------------------------
 
-/// `/ironfurnaces info <pos>`: the harness readout.
+/// `/ironfurnaces info <pos>`: the harness readout. It names another furnace's input, fuel and
+/// output anywhere in the level, so it is registered at the operator level `/data get block`
+/// needs (2, game master) and its body asks again before reading anything.
 pub fn declare_commands(commands: &mut Vec<Command>) {
-    commands.push(Command::new("ironfurnaces info <pos:block_pos>"));
+    commands.push(Command::op(
+        "ironfurnaces info <pos:block_pos>",
+        OPERATOR_LEVEL,
+    ));
 }
 
 /// Run `/ironfurnaces info <pos>` and take it.
@@ -525,6 +542,15 @@ pub fn run_command(host: &mut dyn ServerHost, event: &mut RunModCommandEvent<'_>
     let words: Vec<&str> = invocation.literals.iter().map(String::as_str).collect();
     match words.as_slice() {
         ["ironfurnaces", "info"] => {
+            if !may_read(event.source.permission()) {
+                say(
+                    host,
+                    &format!(
+                        "ironfurnaces info needs an operator (permission level {OPERATOR_LEVEL})"
+                    ),
+                );
+                return Flow::Cancel;
+            }
             let Some(pos) = block_pos(invocation, "pos") else {
                 say(host, "Usage: /ironfurnaces info <x> <y> <z>");
                 return Flow::Cancel;
@@ -570,8 +596,18 @@ fn readout(host: &mut dyn ServerHost, pos: [i32; 3]) -> String {
     )
 }
 
-/// What the readout says where no tier furnace stands.
+/// What the readout says where no tier furnace stands: one generic line, naming no block.
 const NO_FURNACE: &str = "No Iron Furnace there.";
+
+/// The level `/ironfurnaces info` is registered at: 2, the game master level `/data get block`
+/// needs.
+const OPERATOR_LEVEL: u8 = 2;
+
+/// Whether a command source may read a furnace's contents: an operator, or the console (which
+/// always carries level 4).
+fn may_read(permission: mod_api::PermissionLevel) -> bool {
+    permission.level() >= OPERATOR_LEVEL
+}
 
 /// One slot as `id:count`, or `none`.
 fn slot_text(entity: BlockEntityRef, host: &dyn Host, index: usize) -> String {
@@ -701,6 +737,36 @@ mod tests {
     /// `slot_text`'s format without a host: the same string the readout prints.
     fn slot_label(slot: Option<(&str, u32)>) -> String {
         slot.map_or_else(|| "none".to_owned(), |(id, count)| format!("{id}:{count}"))
+    }
+
+    #[test]
+    fn an_upgrade_replaces_the_block_without_spilling_the_old_container() {
+        // The removed block entity's spill is what duplicated the inventory: the snapshot is
+        // restored into the new tier, so anything the old one drops is a second copy.
+        let flags = upgrade_flags();
+        assert!(
+            flags.bits() & BlockUpdateFlags::SKIP_BLOCK_ENTITY_SIDE_EFFECTS.bits() != 0,
+            "the replacement must skip the removed container's spill"
+        );
+        assert!(
+            flags.bits() & BlockUpdateFlags::NEIGHBORS.bits() != 0,
+            "the replacement still updates its neighbours"
+        );
+        assert!(
+            flags.bits() & BlockUpdateFlags::CLIENTS.bits() != 0,
+            "the replacement still reaches clients"
+        );
+    }
+
+    #[test]
+    fn the_readout_needs_an_operator() {
+        use mod_api::PermissionLevel;
+        assert!(!may_read(PermissionLevel::All));
+        assert!(!may_read(PermissionLevel::Moderators));
+        assert!(may_read(PermissionLevel::Gamemasters));
+        assert!(may_read(PermissionLevel::Admins));
+        assert!(may_read(PermissionLevel::Owners));
+        assert_eq!(OPERATOR_LEVEL, 2);
     }
 
     #[test]

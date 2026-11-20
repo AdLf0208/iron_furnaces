@@ -1,6 +1,6 @@
 id = "ironfurnaces"
 name = "Iron Furnaces"
-version = "0.2.0"
+version = "0.2.1"
 description = """A port of Iron Furnaces for Horizon: eight fuel furnaces, from copper to netherite, that smelt
 as their tier does upstream (copper 180 ticks for a 200-tick recipe, iron 160, gold 120, diamond 80,
 emerald 40, obsidian 20, crystal 40, netherite 5), burn fuel in proportion to their own cook time, show
