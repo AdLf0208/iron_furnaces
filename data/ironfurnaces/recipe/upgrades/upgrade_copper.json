@@ -1,13 +1,4 @@
 {
-  "conditions": [
-    {
-      "type": "neoforge:not",
-      "value": {
-        "tag": "c:ingots/copper",
-        "type": "neoforge:tag_empty"
-      }
-    }
-  ],
   "key": {
     "#": "#c:ingots/copper",
     "X": "#minecraft:stone_tool_materials"

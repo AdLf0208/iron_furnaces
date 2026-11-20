@@ -471,3 +471,40 @@ the `[[versions]]` record and links the file, and a **maintainer** runs `scripts
 submission. Still **local-only** until the maintainer approves publishing.
 
 Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices, rust-port
+
+## Review fixes (2026-11-18) — registry source review #1238 (held)
+
+Skills: superpowers/using-superpowers,systematic-debugging,test-driven-development,verification-before-completion; BeautifulRust/rust-best-practices
+
+File: `var/review-all/1238-ironfurnaces.md` (**held until fixed: this blocked listing**). Package
+**0.2.1**, `ironfurnaces.hmod` 276,980 B, sha256
+`0b2a1f2b582c401b92930ecd864d74a057f4f3f47be402c93d2e186f4d7187f1`.
+
+1. **`src/support.rs:404`/`:274` an upgrade snapshotted the furnace's inventory and called
+   `set_block` with normal removal side effects, so the old container spilled its contents while
+   the snapshot was restored into the replacement — every upgrade duplicated its inventory.**
+   The replacement now uses `upgrade_flags()`: neighbours and clients, plus
+   `SKIP_BLOCK_ENTITY_SIDE_EFFECTS`, which suppresses the removed block entity's spill; the
+   snapshot is restored once, by the new block entity's first tick. Pinned by
+   `an_upgrade_replaces_the_block_without_spilling_the_old_container` (watched red with the old
+   flags) and in game by the upgrade phase asserting zero item entities beside the upgraded
+   furnace and the contents present exactly once (`input=minecraft:raw_iron:2`, `fuel=…coal:1`).
+2. **`src/support.rs:513` the public coordinate readout exposed another furnace's input, fuel and
+   output anywhere in the level.** `info` is declared `Command::op(…, 2)` and its body re-checks
+   `may_read(permission)`; a non-furnace still answers the generic `No Iron Furnace there.`
+   Pinned by `the_readout_needs_an_operator` and the in-game de-op phase. `cargo test`: **24
+   passed**.
+
+**Found by the in-game leg (fixed here, not in the reviewer's list).**
+
+- The Part was registered twice (`block_part` per tier *and* `block_entity_part`, which already
+  covers the type's blocks), so the game refused it — the 0.2.0 package could not load. It is
+  attached once, through the type.
+- Three carried recipes (`furnaces/copper_furnace`, `upgrades/upgrade_copper`,
+  `upgrades/upgrade_iron2`) still carried NeoForge load conditions (`neoforge:tag_empty`), which
+  the target version refuses as a hard data error. They are rewritten without the conditions: a
+  recipe whose tag is empty simply never matches, which is what the condition expressed.
+
+In-game: `PASS` + `E2E EXIT:0` (`ports/_shared/evidence/ironfurnaces-e2e/e2e-launcher.log`), control
+`EXIT:1`. The upgrade phase now also asserts **zero item entities** beside the upgraded furnace
+(the spill the reviewer found) and the de-op phase is the readout gate.
